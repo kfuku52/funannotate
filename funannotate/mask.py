@@ -19,7 +19,7 @@ def runTanTan(input, output):
     lib.runSubprocess2(cmd, '.', lib.log, output)
 
 
-def RepeatModelMask(input, cpus, tmpdir, output, repeatlib, debug):
+def RepeatModelMask(input, cpus, tmpdir, output, repeatlib, species, debug):
     lib.log.info("Loading sequences and soft-masking genome")
     outdir = os.path.join(tmpdir, 'RepeatModeler')
     input = os.path.abspath(input)
@@ -30,11 +30,11 @@ def RepeatModelMask(input, cpus, tmpdir, output, repeatlib, debug):
     os.makedirs(outdir)
     lib.log.info("Soft-masking: building RepeatModeler database")
     with open(debug, 'a') as debug_log:
-        subprocess.call(['BuildDatabase', '-name', 'Repeats', input],
+        subprocess.call(['BuildDatabase', '-engine', 'ncbi', '-name', 'Repeats', input],
                         cwd=outdir, stdout=debug_log, stderr=debug_log)
     lib.log.info("Soft-masking: generating repeat library using RepeatModeler")
     with open(debug, 'a') as debug_log:
-        subprocess.call(['RepeatModeler', '-e', 'ncbi', '-database', 'Repeats', '-pa', str(cpus)],
+        subprocess.call(['RepeatModeler', '-database', 'Repeats', '-pa', str(cpus)],
                         cwd=outdir, stdout=debug_log, stderr=debug_log)
     # find name of folder
     RP_folder = '.'
@@ -54,7 +54,7 @@ def RepeatModelMask(input, cpus, tmpdir, output, repeatlib, debug):
         lib.log.info(
             "Soft-masking: running RepeatMasker with default library (RepeatModeler found 0 models)")
         with open(debug, 'a') as debug_log:
-            subprocess.call(['RepeatMasker', '-e', 'ncbi', '-gff', '-species', 'fungi', '-pa', str(cpus), '-xsmall', '-dir', '.', input],
+            subprocess.call(['RepeatMasker', '-e', 'ncbi', '-gff', '-species', species, '-pa', str(cpus), '-xsmall', '-dir', '.', input],
                             cwd=outdir2, stdout=debug_log, stderr=debug_log)
     else:
         lib.log.info("Soft-masking: running RepeatMasker with custom library")
@@ -163,7 +163,7 @@ def main(args):
             if not args.repeatmasker_species:  # no species given, so run entire repeatmodler + repeat masker
                 repeats = 'repeatmodeler-library.'+str(pid)+'.fasta'
                 RepeatModelMask(args.input, args.cpus, tmpdir,
-                                args.out, repeats, log_name)
+                                args.out, repeats, args.repeatmasker_species, log_name)
             else:
                 RepeatMaskSpecies(
                     args.input, args.repeatmasker_species, args.cpus, tmpdir, args.out, log_name)
