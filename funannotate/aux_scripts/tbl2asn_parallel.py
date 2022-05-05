@@ -99,11 +99,11 @@ def runtbl2asn_parallel(folder, template, discrepency, organism, isolate, strain
     fun_version = lib.get_version()
     # input should be a folder
     if not os.path.isdir(folder):
-        lib.log.error("tbl2asn error: %s is not a directory, exiting" % folder)
+        sys.stderr.write("tbl2asn error: %s is not a directory, exiting\n" % folder)
         sys.exit(1)
     # based on organism, isolate, strain, construct meta info for -j flag
     if not organism:
-        lib.log.error("tbl2asn error: organism not specified")
+        sys.stderr.write("tbl2asn error: organism not specified\n")
         sys.exit(1)
     meta = "[organism=" + organism + "]"
     if isolate:
@@ -174,7 +174,7 @@ parser = argparse.ArgumentParser(prog='tbl2asn_parallel.py',
                                  epilog="""Written by Jon Palmer (2016) nextgenusfs@gmail.com""",
                                  formatter_class=MyFormatter)
 parser.add_argument('-i', '--input', required=True,
-                    help='Genome in TLB format')
+                    help='Genome in TBL format')
 parser.add_argument('-f', '--fasta', required=True,
                     help='Genome in FASTA format')
 parser.add_argument('-s', '--species', required=True,
@@ -191,6 +191,10 @@ parser.add_argument('-t', '--tbl2asn', default='-l paired-ends',
 parser.add_argument('-v', '--version', default=1,
                     type=int, help='Genome version')
 args = parser.parse_args()
+
+if not os.path.exists(args.sbt):
+    sys.stderr.write("error: provided sbt file %s does not exist\n" % args.sbt)
+    sys.exit(1)
 
 if not os.path.isdir(args.out):
     os.makedirs(args.out)

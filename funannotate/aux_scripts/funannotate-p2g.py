@@ -7,17 +7,16 @@ import subprocess
 import shutil
 import itertools
 import argparse
+import timeit
+import datetime
 from Bio import SeqIO
-from Bio.SeqIO.FastaIO import SimpleFastaParser
 import funannotate.library as lib
+from pkg_resources import parse_version
 
 # setup menu with argparse
-
-
 class MyFormatter(argparse.ArgumentDefaultsHelpFormatter):
     def __init__(self, prog):
         super(MyFormatter, self).__init__(prog, max_help_position=48)
-
 
 parser = argparse.ArgumentParser(
     prog='funannotate-p2g.py',
@@ -38,6 +37,7 @@ parser.add_argument('--exonerate_pident', default=80,
                     help='Exonerate pct identity')
 parser.add_argument('--logfile', default='funannotate-p2g.log', help='logfile')
 parser.add_argument('--ploidy', default=1, type=int, help='Ploidy of assembly')
+parser.add_argument('--tmpdir', default='/tmp', help='volume to write tmp files')
 parser.add_argument('--debug', action='store_true',
                     help='Keep intermediate folders if error detected')
 parser.add_argument('-f', '--filter', default='diamond', choices=[
@@ -90,7 +90,7 @@ if args.filter == 'diamond':
 def runDiamond(input, query, cpus, output, premade_db=None):
     # create DB of protein sequences
     # check diamond version
-    if lib.getDiamondVersion() >= '2.0.5':
+    if parse_version(lib.getDiamondVersion()) >= parse_version('2.0.5'):
         # run in frameshift mode
         cmd = ['diamond', 'blastx', '--threads', str(cpus), '-q', input,
                '--db', 'diamond', '-o', 'diamond.matches.tab', '-e', '1e-10',
@@ -109,13 +109,13 @@ def runDiamond(input, query, cpus, output, premade_db=None):
     if premade_db is None:
         db_cmd = ['diamond', 'makedb', '--threads',
                   str(cpus), '--in', query, '--db', 'diamond']
-        lib.runSubprocess4(db_cmd, output, lib.log)
+        lib.runSubprocess(db_cmd, output, lib.log, only_failed=True)
     else:
         lib.log.debug('Using premade Diamond database: {}'.format(premade_db))
         os.symlink(os.path.abspath(premade_db),
                    os.path.join(output, 'diamond.dmnd'))
     # now run search
-    lib.runSubprocess4(cmd, output, lib.log)
+    lib.runSubprocess(cmd, output, lib.log, only_failed=True)
 
 
 def runtblastn(input, query, cpus, output, maxhits):
@@ -130,7 +130,9 @@ def runtblastn(input, query, cpus, output, maxhits):
            '-query', query, '-max_target_seqs', str(maxhits),
            '-db_soft_mask', '11',
            '-threshold', '999', '-max_intron_length', str(args.maxintron),
-           '-evalue', '1e-10', '-outfmt', '6', '-out', 'filter.tblastn.tab']
+           '-evalue', '1e-10',
+           '-outfmt', '6 sseqid slen sstart send qseqid qlen qstart qend pident length evalue score',
+           '-out', 'filter.tblastn.tab']
     lib.runSubprocess(cmd, output, lib.log)
 
 
@@ -139,7 +141,7 @@ def parseDiamond(blastresult):
     with open(blastresult, 'r') as input:
         for line in input:
             cols = line.rstrip().split('\t')
-            hit = cols[0] + ':::' + cols[4]
+            #hit = cols[0] + ':::' + cols[4]
             coords = [int(cols[6]), int(cols[7])]
             start_extend = (int(cols[2])*3) - 3
             end_extend = (int(cols[1]) - int(cols[3]))*3
@@ -157,32 +159,32 @@ def parseDiamond(blastresult):
             if end > int(cols[5]):
                 end = int(cols[5])
             if end > start:
-                Results[hit] = (start, end)
+                if cols[0] not in Results:
+                    Results[cols[0]] = [(cols[4], start, end, int(cols[5]), float(cols[8]), float(cols[10]))]
+                else:
+                    Results[cols[0]].append((cols[4], start, end, int(cols[5]), float(cols[8]), float(cols[10])))
             else:
                 lib.log.debug('P2G Error in coords: {:} start={:} stop={:} | {:}'.format(
                     coords, start, end, cols))
-    # convert Dictionary to a list that has  hit:::scaffold:::start:::stop
-    HitList = []
-    for k, v in list(Results.items()):
-        finalhit = k+':::'+str(v[0])+':::'+str(v[1])
-        HitList.append(finalhit)
-    return HitList
+    return Results
 
 
 def parseBlast(blastresult):
+    # 6 'qseqid sseqid pident length mismatch gapopen qstart qend sstart send evalue bitscore
+    # '6 sseqid slen sstart send qseqid qlen qstart qend pident length evalue score'
     Results = {}
     with open(blastresult, 'r') as input:
         for line in input:
             cols = line.split('\t')
-            hit = cols[0] + ':::' + cols[1]
-            if int(cols[8]) < int(cols[9]):
-                start = cols[8]
-                end = cols[9]
+            hit = cols[4] + ':::' + cols[0]
+            if int(cols[2]) < int(cols[3]):
+                start = cols[2]
+                end = cols[3]
             else:
-                start = cols[9]
-                end = cols[8]
+                start = cols[3]
+                end = cols[2]
             if not hit in Results:
-                Results[hit] = (start, end)
+                Results[hit] = (int(start), int(end), int(cols[1]), float(cols[8]), float(cols[10]))
             else:
                 # get old start stop
                 old = Results.get(hit)
@@ -194,79 +196,50 @@ def parseBlast(blastresult):
                     newstop = end
                 else:
                     newstop = old[1]
-                Results[hit] = (newstart, newstop)
+                Results[hit] = (int(newstart), int(newstop), old[2], old[3], old[4])
     # convert Dictionary to a list that has  hit:::scaffold:::start:::stop
-    HitList = []
+    filtered = {}
     for k, v in list(Results.items()):
-        finalhit = k+':::'+str(v[0])+':::'+str(v[1])
-        HitList.append(finalhit)
-    return HitList
-
-
-def runExonerate(input):
-    s = input.split(':::')
-    ProtID = s[0]
-    ScaffID = s[1]
-    ScaffStart = int(s[2])
-    ScaffEnd = int(s[3])
-    # get the protein model
-    query = os.path.join(tmpdir, ProtID+'.'+str(uuid.uuid4())+'.fa')
-    with open(query, 'w') as output:
-        SeqIO.write(protein_dict[ProtID], output, 'fasta')
-    # now get the genome region, use different variable names for SeqRecords to avoid collision
-    scaffold = os.path.join(tmpdir, ScaffID+'.'+ProtID +
-                            '.'+str(ScaffStart)+'-'+str(ScaffEnd)+'.fa')
-    with open(scaffold, 'w') as output2:
-        with open(os.path.join(tmpdir, 'scaffolds', ScaffID+'.fa'), 'r') as fullscaff:
-            for header, Sequence in SimpleFastaParser(fullscaff):
-                # grab a 3 kb cushion on either side of hit region, careful of scaffold ends
-                start = ScaffStart - 3000
-                if start < 1:
-                    start = 1
-                end = ScaffEnd + 3000
-                if end > len(Sequence):
-                    end = len(Sequence)
-                output2.write('>%s\n%s\n' % (header, Sequence[start:end]))
-    exoname = ProtID+'.'+ScaffID+'__'+str(start)+'__'
-    # check that input files are created and valid
-    exonerate_out = os.path.join(tmpdir, 'exonerate.' + exoname + '.out')
-    ryo = "AveragePercentIdentity: %pi\n"
-    cmd = ['exonerate', '--model', 'p2g', '--showvulgar', 'no',
-           '--showalignment', 'no', '--showquerygff', 'no',
-           '--showtargetgff', 'yes', '--maxintron', str(args.maxintron),
-           '--percent', str(args.exonerate_pident),
-           '--ryo', ryo, query, scaffold]
-    if lib.checkannotations(query) and lib.checkannotations(scaffold):
-        # run exonerate, capture errors
-        with open(exonerate_out, 'w') as output3:
-            proc = subprocess.Popen(
-                cmd, stdout=output3, stderr=subprocess.PIPE,
-                universal_newlines=True)
-        stderr = proc.communicate()
-        if 'WARNING' in stderr[1]:
-            lib.log.debug('Error in input:{:}'.format(input))
-            lib.log.debug('%s, Len=%i, %i-%i; %i-%i' %
-                          (header, len(Sequence), ScaffStart,
-                           ScaffEnd, start, end))
-            os.rename(query, os.path.join(
-                tmpdir, 'failed', os.path.basename(query)))
-            os.rename(scaffold, os.path.join(
-                tmpdir, 'failed', os.path.basename(scaffold)))
+        qseqid, sseqid = k.split(':::')
+        if not qseqid in filtered:
+            filtered[qseqid] = [(sseqid, v[0], v[1], v[2], v[3], v[4])]
         else:
-            for y in [query, scaffold]:
-                try:
-                    lib.SafeRemove(y)
-                except OSError:
-                    lib.log.debug("Error removing %s" % (y))
-        # check filesize of exonerate output, no hits still have some output
-        # data in them, should be safe dropping anything smaller than 500 bytes
-        if lib.getSize(exonerate_out) < 500:
-            os.remove(exonerate_out)
-    else:
-        lib.log.debug('Error in query or scaffold:{:}'.format(input))
-        lib.SafeRemove(query)
-        lib.SafeRemove(scaffold)
+            filtered[qseqid].append((sseqid, v[0], v[1], v[2], v[3], v[4]))
+    return filtered
 
+
+def spawn(cmd, **kwargs):
+    # last item in cmd list is output file
+    run_cmd = cmd[:-1]
+    outfile = cmd[-1]
+    with open(outfile, 'w') as output:
+        p = subprocess.Popen(run_cmd, stdout=output, stderr=subprocess.PIPE, **kwargs)
+    stderr = p.communicate()
+    if p.returncode != 0:
+        print('ERROR: {}'.format(' '.join(run_cmd)))
+        if stderr:
+            print(stderr.decode("utf-8"))
+        return 1
+    else:
+        return 0
+
+# write contig slices based on the diamond/tblastn parsed locations for staging exonerate runs
+def contig_writer(scaff):
+    # input here is dict items, so (contig, [(filename, start, end)])
+    # just need to index the scaffold, then write all the files
+    # old debugging
+    # PID = os.getpid()
+    #    lib.log.debug('PID {} working on {} splits of {}'.format(PID, len(scaff[1]), scaff[0]))
+    record = SeqIO.index(os.path.join(tmpdir, 'scaffolds', '{}.fa'.format(scaff[0])),'fasta')
+    recstr = record[scaff[0]] # move this outside the loop reduces the number of lookups required
+                              # just reuse this object to create slices
+    for z in scaff[1]:
+        # I wonder if this would be faster if we just kept a set in memory and
+        # skipped the isfile call and just checked to see if a filename was in our in-memory set?
+        if not os.path.isfile(z[0]):
+            with open(z[0], 'w') as outfile:
+                outfile.write('>{}\n{}\n'.format(scaff[0], lib.softwrap(str(recstr[z[1]:z[2]].seq))))
+#    lib.log.debug('PID {} for {} finished'.format(PID, scaff[0]))
 
 # count number of proteins to look for
 total = lib.countfasta(args.proteins)
@@ -274,12 +247,14 @@ lib.log.info('Mapping {:,} proteins to genome using {:} and exonerate'.format(
     total, args.filter))
 
 # make tmpdir
-tmpdir = 'p2g_' + str(uuid.uuid4())
+tmpdir = os.path.join(args.tmpdir, 'p2g_' + str(uuid.uuid4()))
 if not os.path.isdir(tmpdir):
     os.makedirs(tmpdir)
     os.makedirs(os.path.join(tmpdir, 'failed'))
     os.makedirs(os.path.join(tmpdir, 'scaffolds'))
+    os.makedirs(os.path.join(tmpdir, 'proteins'))
 
+filter_tic = timeit.default_timer()
 if args.filter == 'tblastn':
     lib.log.debug("BLAST v%s; Exonerate v%s" % (blast_version, exo_version))
     # check for tblastn input
@@ -296,28 +271,84 @@ else:
     lib.log.debug("Diamond v%s; Exonerate v%s" %
                   (diamond_version, exo_version))
     # run Diamond
-    BlastResult = os.path.join(tmpdir, 'diamond.matches.tab')
-    runDiamond(os.path.abspath(args.genome), os.path.abspath(
-        args.proteins), args.cpus, tmpdir, premade_db=args.filter_db)
+    if args.tblastn:
+        lib.log.info("Using pre-calculated Diamond result")
+        BlastResult = args.tblastn
+    else:
+        BlastResult = os.path.join(tmpdir, 'diamond.matches.tab')
+        runDiamond(os.path.abspath(args.genome), os.path.abspath(
+            args.proteins), args.cpus, tmpdir, premade_db=args.filter_db)
+    # parse results
     Hits = parseDiamond(BlastResult)
+filter_toc = timeit.default_timer()
+filter_runtime = filter_toc - filter_tic
 
-lib.log.info('Found {0:,}'.format(len(Hits)) +
-             ' preliminary alignments --> aligning with exonerate')
-
+# now generate the fasta files and build exonerate commands
 # index the genome and proteins
-# do index here in case memory problems?
+fasta_tic = timeit.default_timer()
 protein_dict = SeqIO.index(os.path.abspath(args.proteins), 'fasta')
+genome_dict = SeqIO.index(os.path.abspath(args.genome), 'fasta')
+exo_cmds = []
+scaffold_splits = {}
+# first write the proteins on single loop through
+# collect the scaffold splits by each scaffold so can run this in parallel
+# there seems to be a race condition if trying to access the same index at the same time from diff processes
 
-# split genome fasta into individual scaffolds
-with open(os.path.abspath(args.genome), 'r') as input:
-    for record in SeqIO.parse(input, "fasta"):
-        SeqIO.write(record, os.path.join(
-            tmpdir, 'scaffolds', record.id + ".fa"), "fasta")
+for k, v in Hits.items():
+    protfile = os.path.join(tmpdir, 'proteins', k.replace('|', '_')+'.fasta')
+    if not os.path.isfile(protfile):
+        # I tested and there was no signif difference with using Biopython SeqIO.write
+        # but leaving this string -> softwrap
+        protSeq = str(protein_dict[k].seq)
+        with open(protfile, 'w') as outfile:
+            outfile.write('>{}\n{}\n'.format(k, lib.softwrap(protSeq)))
+    for i, x in enumerate(sorted(v, key=lambda y: y[4], reverse=True)):
+        if i <= args.ploidy*2:  # look for 2 hits for each copy
+            # lets add 3kb in each direction to make sure exonerate can find it
+            start = x[1] - 3000
+            if start < 0:
+                start = 0
+            end = x[2] + 3000
+            if end > x[3]:
+                end = x[3]
+            exoname = k+'.'+x[0]+'__'+str(start)+'__'
+            # check that input files are created and valid
+            exonerate_out = os.path.join(tmpdir, 'exonerate.' + exoname + '.out')
+            dnafile = os.path.join(tmpdir, 'scaffolds', '{}_{}-{}.fasta'.format(x[0], start, end))
+            if not x[0] in scaffold_splits:
+                scaffold_splits[x[0]] = [(dnafile, start, end)]
+                # write the whole scaffold to file to use later
+                with open(os.path.join(tmpdir, 'scaffolds', '{}.fa'.format(x[0])), 'w') as outfile:
+                    outfile.write('>{}\n{}\n'.format(x[0], lib.softwrap(str(genome_dict[x[0]].seq))))
+            else:
+                scaffold_splits[x[0]].append((dnafile, start, end))
+            # now build exonerate command and add to list
+            cmd = ['exonerate', '--model', 'p2g', '--showvulgar', 'no',
+                '--showalignment', 'no', '--showquerygff', 'no',
+                '--showtargetgff', 'yes', '--maxintron', str(args.maxintron),
+                '--percent', str(args.exonerate_pident),
+                '--ryo', "AveragePercentIdentity: %pi\n", protfile, dnafile, exonerate_out]
+            exo_cmds.append(cmd)
+
+# clear memory for these objects as needed
+genome_dict = None
+protein_dict = None
+# now we want to run the contig writer across multiple processes
+lib.log.debug('Writing {} contig splits for exonerate'.format(len(exo_cmds)))
+lib.runMultiProgress(contig_writer, scaffold_splits.items(), args.cpus, progress=False)
+
+fasta_toc = timeit.default_timer()
+fasta_runtime = fasta_toc - fasta_tic
+lib.log.info('Found {:,} preliminary alignments with {:} in {:} --> generated FASTA files for exonerate in {:}'.format(
+    len(exo_cmds), args.filter, str(datetime.timedelta(seconds=filter_runtime)).rsplit('.', 1)[0],
+    str(datetime.timedelta(seconds=fasta_runtime)).rsplit('.', 1)[0]))
 
 # run multiprocessing exonerate
-lib.runMultiProgress(runExonerate, Hits, args.cpus,
+exo_tic = timeit.default_timer()
+lib.runMultiProgress(spawn, exo_cmds, args.cpus,
                      progress=args.progress)
-
+exo_toc = timeit.default_timer()
+exo_runtime = exo_toc - exo_tic
 # now need to loop through and offset exonerate predictions back to whole scaffolds
 exonerate_raw = os.path.join(tmpdir, 'exonerate.out.combined')
 with open(exonerate_raw, 'w') as output:
@@ -340,7 +371,8 @@ with open(args.out, 'w') as output:
 
 # output some quick summary of exonerate alignments that you found
 Found = lib.countGFFgenes(exonerate_raw)
-lib.log.info('Exonerate finished: found {:,} alignments'.format(Found))
+lib.log.info('Exonerate finished in {:}: found {:,} alignments'.format(
+    str(datetime.timedelta(seconds=exo_runtime)).rsplit('.', 1)[0], Found))
 
 # check for saving output of tblastn
 if args.tblastn_out:

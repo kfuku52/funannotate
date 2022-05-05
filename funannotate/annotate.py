@@ -3,12 +3,15 @@
 
 
 import funannotate.library as lib
+from funannotate.aux_scripts.fasta2agp import parse_scaffolds_makeagp
+from pkg_resources import parse_version
 import sys
 import os
 import subprocess
 import shutil
 import argparse
 import re
+import uuid
 from natsort import natsorted
 import warnings
 from Bio import SeqIO
@@ -31,7 +34,7 @@ def MEROPSBlast(input, cpus, evalue, tmpdir, output, diamond=True):
         cmd = ['blastp', '-db', blastdb, '-outfmt', '5', '-out', blast_tmp, '-num_threads', str(cpus),
                '-max_target_seqs', '1', '-evalue', str(evalue), '-query', input]
     if not os.path.isfile(blast_tmp):
-        lib.runSubprocess4(cmd, '.', lib.log)
+        lib.runSubprocess(cmd, '.', lib.log, only_failed=True)
     # parse results
     with open(output, 'w') as out:
         with open(blast_tmp, 'r') as results:
@@ -61,7 +64,7 @@ def SwissProtBlast(input, cpus, evalue, tmpdir, GeneDict, diamond=True):
                '-num_threads', str(cpus), '-max_target_seqs', '1',
                '-evalue', str(evalue), '-query', input]
     if not lib.checkannotations(blast_tmp):
-        lib.runSubprocess4(cmd, '.', lib.log)
+        lib.runSubprocess(cmd, '.', lib.log, only_failed=True)
     # parse results
     counter = 0
     total = 0
@@ -184,7 +187,7 @@ def getEggNogHeadersv2(input):
             if line.startswith('#query'):  # this is HEADER
                 line = line.rstrip()
                 headerCols = line.split('\t')
-                IDi = 0
+                IDi = item2index(headerCols, '#query')
                 Genei = item2index(headerCols, 'Preferred_name')
                 DBi = item2index(headerCols, 'eggNOG OGs')
                 OGi = item2index(headerCols, 'best_og_name')
@@ -192,13 +195,32 @@ def getEggNogHeadersv2(input):
                 Desci = item2index(headerCols, 'best_og_desc')
                 ECi = item2index(headerCols, 'EC')
                 break
-    if not IDi:  # then no header file, so have to guess
-        IDi, DBi, OGi, Genei, COGi, Desci, ECi = (0, 4, 8, 11, 9, 10, 13)
+    return IDi, DBi, OGi, Genei, COGi, Desci, ECi
+
+def getEggNogHeadersv212(input):
+    '''
+    function to get the headers from eggnog mapper annotations
+    '''
+    IDi, DBi, OGi, Genei, COGi, Desci, ECi = (None,)*7
+    with open(input, 'r') as infile:
+        for line in infile:
+            if line.startswith('#query'):  # this is HEADER
+                line = line.rstrip()
+                headerCols = line.split('\t')
+                IDi = item2index(headerCols, '#query')
+                Genei = item2index(headerCols, 'Preferred_name')
+                DBi = item2index(headerCols, 'eggNOG_OGs')
+                OGi = item2index(headerCols, 'max_annot_lvl')
+                COGi = item2index(headerCols, 'COG_category')
+                Desci = item2index(headerCols, 'Description')
+                ECi = item2index(headerCols, 'EC')
+                break
     return IDi, DBi, OGi, Genei, COGi, Desci, ECi
 
 def parseEggNoggMapper(input, output, GeneDict):
     # try to parse header
     version, prefix = getEggnogVersion(input)
+    lib.log.info('EggNog version parsed as {}'.format(version))
     if version and version > ('2.0.0') and version < ('2.0.5'):
         lib.log.error('Unable to parse emapper results from v{}, please use either v1.0.3 or >=v2.0.5'.format(version))
         return {}
@@ -211,8 +233,10 @@ def parseEggNoggMapper(input, output, GeneDict):
     # indexes from header file
     if version < ('2.0.0'):
         IDi, DBi, OGi, Genei, COGi, Desci, ECi = getEggNogHeaders(input)
-    else:
+    elif version < ('2.1.2'):
         IDi, DBi, OGi, Genei, COGi, Desci, ECi = getEggNogHeadersv2(input)
+    else:
+        IDi, DBi, OGi, Genei, COGi, Desci, ECi = getEggNogHeadersv212(input)
     # take annotations file from eggnog-mapper and create annotations
     with open(output, 'w') as out:
         with open(input, 'r') as infile:
@@ -225,7 +249,7 @@ def parseEggNoggMapper(input, output, GeneDict):
                 ID = cols[IDi]
                 Description = cols[Desci].split('. ')[0]
                 Gene = ''
-                if cols[Genei] != '':
+                if cols[Genei] not in ['', '-']:
                     if not '_' in cols[Genei] and not '.' in cols[Genei] and number_present(cols[Genei]) and len(cols[Genei]) > 2 and not morethanXnumbers(cols[Genei], 3):
                         Gene = cols[Genei]
                 if version < ('2.0.0'):
@@ -237,7 +261,7 @@ def parseEggNoggMapper(input, output, GeneDict):
                         if DB in x:
                             NOG = prefix + x.split('@')[0]
                     COGs = cols[COGi].replace(' ', '')
-                else:  # means we have v2 or great
+                elif version < ('2.1.2'):  # means we have v2 or great
                     try:
                         NOG, DB = cols[OGi].split('@')
                     except ValueError:  # means either 0 or more than 1 "best_OG" drop for now
@@ -254,13 +278,30 @@ def parseEggNoggMapper(input, output, GeneDict):
                     COGs = cols[COGi].replace(' ', '')
                     if len(COGs) > 1:
                         COGs = ''.join([c + ',' for c in COGs]).rstrip(',')
-
+                else:
+                    DB = cols[OGi]
+                    EC = cols[ECi]
+                    if ',' in EC: # this is least common ancestor approach
+                        EC = os.path.commonprefix(EC.split(',')).rstrip('.')
+                    NOG = ''
+                    OGs = cols[DBi].split(',')
+                    for ogx in OGs:
+                        nog_acc, taxname = ogx.split('@')
+                        if taxname == DB:
+                            NOG = nog_acc
+                    NOG = prefix+NOG
+                    COGs = cols[COGi].replace(' ', '')
+                    if len(COGs) > 1:
+                       COGs = ''.join([c + ',' for c in COGs]).rstrip(',')
+                #print(line)
+                #print(ID, Gene, Description, DB, EC, NOG, COGs)
                 if EC and EC != '':
                     out.write("%s\tEC_number\t%s\n" % (ID, EC))
                 if NOG == '':
                     continue
                 if not NOG in Definitions:
                     Definitions[NOG] = Description
+
                 out.write("%s\tnote\tEggNog:%s\n" % (ID, NOG))
                 if COGs != '':
                     out.write("%s\tnote\tCOG:%s\n" % (ID, COGs))
@@ -297,6 +338,21 @@ def getEggnogVersion(annotfile):
     return vers, prefix
 
 
+def get_emapper_version():
+    r = subprocess.Popen(['emapper.py', '--version'], stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True).communicate()
+    if 'emapper' in r[0]:
+        i = 0
+    elif 'emapper' in r[1]:
+        i = 1
+    vers = r[i].strip()
+    m = re.match('emapper-(\S+)',vers)
+    if m:
+        vers = m.group(1)
+        return vers
+    else:
+        return False
+
+
 def main(args):
     # setup menu with argparse
     class MyFormatter(argparse.ArgumentDefaultsHelpFormatter):
@@ -322,6 +378,8 @@ def main(args):
                         help='Custom parameters for tbl2asn, example: linkage and gap info')
     parser.add_argument('-a', '--annotations',
                         help='Custom annotations, tsv 3 column file')
+    parser.add_argument('-m', '--mito-pass-thru', dest='mito',
+                        help='Mitochondrial contigs pass to tbl2asn, file:mcode')
     parser.add_argument('--isolate', help='Isolate name (e.g. Af293)')
     parser.add_argument('--strain', help='Strain name (e.g. CEA10)')
     parser.add_argument('--cpus', default=2, type=int,
@@ -350,6 +408,7 @@ def main(args):
                         help='no progress on multiprocessing')
     parser.add_argument('--header_length', default=16,
                         type=int, help='Max length for fasta headers')
+    parser.add_argument('--tmpdir', default='/tmp', help='volume to write tmp files')
     args = parser.parse_args(args)
 
     global parentdir, IPR2ANNOTATE, FUNDB
@@ -359,7 +418,7 @@ def main(args):
 
     # start here rest of script
     # create log file
-    log_name = 'funannotate-annotate.'+str(os.getpid())+'.log'
+    log_name = 'funannotate-annotate.'+str(uuid.uuid4())[-8:] + '.log'
     if os.path.isfile(log_name):
         os.remove(log_name)
 
@@ -731,6 +790,8 @@ def main(args):
         outputdir, 'annotate_misc', 'annotations.eggnog.txt')
     eggnog_result = os.path.join(
         outputdir, 'annotate_misc', 'eggnog.emapper.annotations')
+    egg_unique_id = str(uuid.uuid4())[-8:]
+    scratch_dir = os.path.join(args.tmpdir, 'emapper-{}'.format(egg_unique_id))
     if args.eggnog:
         if os.path.isfile(eggnog_result):
             os.remove(eggnog_result)
@@ -740,8 +801,22 @@ def main(args):
             lib.log.info("Running Eggnog-mapper")
             cmd = ['emapper.py', '-m', 'diamond', '-i', Proteins,
                    '-o', 'eggnog', '--cpu', str(args.cpus)]
+            if parse_version(get_emapper_version()) >= parse_version('2.1.0'):
+                if not os.path.isdir(args.tmpdir):
+                    os.makedirs(args.tmpdir)
+                if not os.path.isdir(scratch_dir):
+                    os.makedirs(scratch_dir)
+                cmd += ['--scratch_dir', scratch_dir,
+                        '--temp_dir', args.tmpdir]
+                if lib.MemoryCheck() >= 48:
+                    cmd.append('--dbmem')
+            if parse_version(get_emapper_version()) >= parse_version('2.1.4'):
+                if parse_version(lib.getDiamondVersion()) < parse_version('2.0.11'):
+                    cmd += ['--dmnd_iterate', 'no']
             lib.runSubprocess(cmd, os.path.join(
                 outputdir, 'annotate_misc'), lib.log)
+            if os.path.isdir(scratch_dir):
+                shutil.rmtree(scratch_dir)
         else:
             lib.log.info(
                 "Install eggnog-mapper or use webserver to improve functional annotation: https://github.com/jhcepas/eggnog-mapper")
@@ -1069,8 +1144,35 @@ def main(args):
         lib.SafeRemove(os.path.join(outputdir, 'annotate_misc', 'tbl2asn'))
     os.makedirs(os.path.join(outputdir, 'annotate_misc', 'tbl2asn'))
     TBLOUT = os.path.join(outputdir, 'annotate_misc', 'tbl2asn', 'genome.tbl')
-    shutil.copyfile(Scaffolds, os.path.join(
-        outputdir, 'annotate_misc', 'tbl2asn', 'genome.fsa'))
+    tbl2genome = os.path.join(outputdir, 'annotate_misc', 'tbl2asn', 'genome.fsa')
+    shutil.copyfile(Scaffolds, tbl2genome)
+    # check for mitochondrial genome/contigs to pass-thru
+    if args.mito:
+        if ':' in args.mito:
+            mitocontigs, mcode = args.mito.rsplit(':', 1)
+        else:
+            mitocontigs = args.mito
+            mcode = 4
+        if not lib.checkannotations(mitocontigs):
+            lib.log.error('Mitochondrial pass thru detected, but {} is not a file or is empty'.format(mitocontigs))
+        else:
+            # mcode should be an integer
+            try:
+                mcode = int(mcode)
+            except ValueError:
+                lib.log.error('Mitochondrial pass thru mocde {} is not an integer'.format(mcode))
+            if isinstance(mcode, int):
+                # now we can safely add to genome.fsa
+                with open(tbl2genome, 'a') as outfile:
+                    with open(mitocontigs, 'r') as infile:
+                        for rec in SeqIO.parse(infile, 'fasta'):
+                            if 'circular' in rec.description:
+                                topology = '[topology=circular] '
+                            else:
+                                topology = ''
+                            outfile.write(
+                                '>{} [mcode={}] {}[location=mitochondrion]\n{}\n'.format(
+                                    rec.id, mcode, topology, lib.softwrap(str(rec.seq))))
 
     # add annotation to tbl annotation file, generate dictionary of dictionaries with values as a list
     # need to keep multiple transcripts annotations separate, so this approach may have to modified
@@ -1299,10 +1401,13 @@ def main(args):
 
     # write AGP output so all files in correct directory
     lib.log.info("Creating AGP file and corresponding contigs file")
-    agp2fasta = os.path.join(parentdir, 'aux_scripts', 'fasta2agp.pl')
-    AGP = os.path.join(ResultsFolder, organism_name+'.agp')
-    cmd = ['perl', agp2fasta, organism_name+'.scaffolds.fa']
-    lib.runSubprocess2(cmd, ResultsFolder, lib.log, AGP)
+    # no reason to use suprocess here, we should be able to import and run
+    #agp2fasta = os.path.join(parentdir, 'aux_scripts', 'fasta2agp.py')
+    agp_final = os.path.join(ResultsFolder, organism_name+'.agp')
+    agp_contigs = os.path.join(ResultsFolder, organism_name+'.contigs.fsa')
+    parse_scaffolds_makeagp(final_fasta, agp_final, agp_contigs)
+    #cmd = ['python', agp2fasta, organism_name+'.scaffolds.fa',AGP]
+    #lib.runSubprocess(cmd, ResultsFolder, lib.log)
 
     # write secondary metabolite clusters output using the final genome in gbk format
     if lib.checkannotations(antismash_input):
@@ -1338,7 +1443,7 @@ def main(args):
                '--db', mibig_db, '--max-hsps', '1',
                '--evalue', '0.001', '--max-target-seqs', '1',
                '--outfmt', '6']
-        lib.runSubprocess4(cmd, '.', lib.log)
+        lib.runSubprocess(cmd, '.', lib.log, only_failed=True)
         # now parse blast results to get {qseqid: hit}
         MIBiGBlast = {}
         with open(mibig_blast, 'r') as input:
@@ -1395,7 +1500,7 @@ def main(args):
                                 SeqIO.write(sub_record, clusterout, 'genbank')
                             except ValueError:
                                 print(slice)
-                                print(subrecord.id)
+                                print(sub_record.id)
                                 print(sub_record.annotations)
                                 sys.exit(1)
 

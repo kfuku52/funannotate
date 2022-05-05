@@ -68,11 +68,13 @@ version:     {:}
 
 Description: This script sorts the input contigs by size (longest->shortest) and then relabels
              the contigs with a simple name (e.g. scaffold_1).  Augustus can have problems with
-             some complicated contig names.
+             some complicated contig names.  Alternatively pass -s,--simplify in order
+             to split fasta headers at first space.
 
 Arguments:
   -i, --input    Multi-fasta genome file. (Required)
   -o, --out      Sorted by size and relabeled output file. (Required)
+  -s, --simplify Try to simplify the FASTA headers, split at first space.
   -b, --base     Base name to relabel contigs. Default: scaffold
   --minlen       Shorter contigs are discarded. Default: 0
         """.format(package_name, __version__)
@@ -210,6 +212,7 @@ Optional:
   --force                  Annotated unmasked genome
   --cpus                   Number of CPUs to use. Default: 2
   --no-progress            Do not print progress to stdout for long sub jobs
+  --tmpdir                 Volume/location to write temporary files. Default: /tmp
 
 ENV Vars:  If not specified at runtime, will be loaded from your $PATH
   --EVM_HOME
@@ -386,34 +389,36 @@ Description: Script functionally annotates the results from funannotate predict.
              annotation from PFAM, InterPro, EggNog, UniProtKB, MEROPS, CAZyme, and GO ontology.
 
 Required:
-  -i, --input        Folder from funannotate predict
+  -i, --input          Folder from funannotate predict
     or
-  --genbank          Genome in GenBank format
-  -o, --out          Output folder for results
+  --genbank            Genome in GenBank format
+  -o, --out            Output folder for results
     or
-  --gff              Genome GFF3 annotation file
-  --fasta            Genome in multi-fasta format
-  -s, --species      Species name, use quotes for binomial, e.g. "Aspergillus fumigatus"
-  -o, --out          Output folder for results
+  --gff                Genome GFF3 annotation file
+  --fasta              Genome in multi-fasta format
+  -s, --species        Species name, use quotes for binomial, e.g. "Aspergillus fumigatus"
+  -o, --out            Output folder for results
 
 Optional:
-  --sbt              NCBI submission template file. (Recommended)
-  -a, --annotations  Custom annotations (3 column tsv file)
-  --eggnog           Eggnog-mapper annotations file (if NOT installed)
-  --antismash        antiSMASH secondary metabolism results (GBK file from output)
-  --iprscan          InterProScan5 XML file
-  --phobius          Phobius pre-computed results (if phobius NOT installed)
-  --isolate          Isolate name
-  --strain           Strain name
-  --rename           Rename GFF gene models with locus_tag from NCBI.
-  --fix              Gene/Product names fixed (TSV: GeneID\tName\tProduct)
-  --remove           Gene/Product names to remove (TSV: Gene\tProduct)
-  --busco_db         BUSCO models. Default: dikarya
-  -t, --tbl2asn      Additional parameters for tbl2asn. Default: "-l paired-ends"
-  -d, --database     Path to funannotate database. Default: $FUNANNOTATE_DB
-  --force            Force over-write of output folder
-  --cpus             Number of CPUs to use. Default: 2
-  --no-progress      Do not print progress to stdout for long sub jobs
+  --sbt                NCBI submission template file. (Recommended)
+  -a, --annotations    Custom annotations (3 column tsv file)
+  -m, --mito-pass-thru Mitochondrial genome/contigs. append with :mcode
+  --eggnog             Eggnog-mapper annotations file (if NOT installed)
+  --antismash          antiSMASH secondary metabolism results (GBK file from output)
+  --iprscan            InterProScan5 XML file
+  --phobius            Phobius pre-computed results (if phobius NOT installed)
+  --isolate            Isolate name
+  --strain             Strain name
+  --rename             Rename GFF gene models with locus_tag from NCBI.
+  --fix                Gene/Product names fixed (TSV: GeneID\tName\tProduct)
+  --remove             Gene/Product names to remove (TSV: Gene\tProduct)
+  --busco_db           BUSCO models. Default: dikarya
+  -t, --tbl2asn        Additional parameters for tbl2asn. Default: "-l paired-ends"
+  -d, --database       Path to funannotate database. Default: $FUNANNOTATE_DB
+  --force              Force over-write of output folder
+  --cpus               Number of CPUs to use. Default: 2
+  --tmpdir             Volume/location to write temporary files. Default: /tmp
+  --no-progress        Do not print progress to stdout for long sub jobs
          """.format(package_name, __version__)
 
 compareHelp = """
@@ -517,6 +522,7 @@ Arguments:   -g, --genome       Genome FASTA format (Required)
              --maxintron        Max intron length. Default: 3000
              --cpus             Number of cpus to use. Default: 2
              --EVM_HOME         Location of Evidence Modeler home directory. Default: $EVM_HOME
+             --tmpdir           Volume/location to write temporary files. Default: /tmp
              --logfile          Logfile output file
            """.format(package_name, __version__)
 

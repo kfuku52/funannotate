@@ -21,11 +21,12 @@ def gene_blocks_to_interlap(input):
     with open(input, 'r') as infile:
         for gene_model in lib.readBlocks(infile, '\n'):
             # will be list of lines, so need to find gene line
-            if gene_model[0] == '\n':
-                cols = gene_model[1].split('\t')
-            else:
-                cols = gene_model[0].split('\t')
-            inter[cols[0]].add((int(cols[3]), int(cols[4]), gene_model))
+            if len(gene_model) > 1: # last line is has only a single element
+                if gene_model[0] == '\n':
+                    cols = gene_model[1].split('\t')
+                else:
+                    cols = gene_model[0].split('\t')
+                inter[cols[0]].add((int(cols[3]), int(cols[4]), gene_model))
     return inter
 
 
@@ -119,7 +120,6 @@ def solve_partitions(values, interval=2000):
         print(y)
 
 
-
 def create_partitions(fasta, genes, partition_list, proteins=False,
                       transcripts=False, repeats=False, num=50,
                       tmpdir='.', interval=2000, partitions=True,
@@ -127,6 +127,8 @@ def create_partitions(fasta, genes, partition_list, proteins=False,
     # function to create EVM partition intervals that do not split genes
     if not os.path.isdir(tmpdir):
         os.makedirs(tmpdir)
+    f_idx = fasta + ".idx"
+    #SeqRecords = SeqIO.index_db(f_idx, fasta, 'fasta')
     SeqRecords = SeqIO.index(fasta, 'fasta')
     PID = os.getpid()
     bedGenes = os.path.join(tmpdir, 'genes.{}.bed'.format(PID))
@@ -345,7 +347,7 @@ def create_partitions(fasta, genes, partition_list, proteins=False,
                     repPred = os.path.join(chrDir, os.path.basename(repeats))
                     RangeFinder(interRepeats, chr, 1, len(SeqRecords[chr]),
                                 repPred)
-
+    SeqRecords.close()
     return Commands
 
 
